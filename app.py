@@ -125,14 +125,20 @@ def build_pubmed_query(query: str, mode: str, aliases: list[str]) -> str:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def search_pubmed(query: str, mode: str, aliases: list[str], max_results: int = 40) -> list[dict]:
+def search_pubmed(query: str, mode: str, aliases: list[str], max_results: int = 40, min_year: int = 2015) -> list[dict]:
     pm_query = build_pubmed_query(query, mode, aliases)
     base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
-    # Search
+    # Search — relevance-sorted, filtered to min_year onwards
     r = requests.get(f"{base}/esearch.fcgi", params={
-        "db": "pubmed", "term": pm_query,
-        "retmax": max_results, "retmode": "json", "sort": "relevance"
+        "db":       "pubmed",
+        "term":     pm_query,
+        "retmax":   max_results,
+        "retmode":  "json",
+        "sort":     "relevance",
+        "datetype": "pdat",
+        "mindate":  str(min_year),
+        "maxdate":  "3000",
     }, timeout=15)
     ids = r.json().get("esearchresult", {}).get("idlist", [])
     if not ids:
@@ -175,41 +181,44 @@ def parse_pubmed_xml(xml_text: str) -> list[dict]:
         )
 
         papers.append({
-            "pmid":       pmid,
-            "title":      title,
-            "abstract":   abstract,
-            "authors":    ", ".join(authors),
-            "journal":    journal,
-            "year":       year,
-            "raw_index":  i,
-            "category":   "other",
-            "confidence": "low",
+            "pmid":        pmid,
+            "title":       title,
+            "abstract":    abstract,
+            "authors":     ", ".join(authors),
+            "journal":     journal,
+            "year":        year,
+            "raw_index":   i,
+            "category":    "other",
+            "confidence":  "low",
             "key_findings": [],
+            "source_db":   "PubMed",
         })
     return papers
+
 
 # ══════════════════════════════════════════════════════════════
 # EUROPE PMC SEARCH
 # ══════════════════════════════════════════════════════════════
-@st.cache_data(ttl=1800, show_spinner=False)
-def search_europe_pmc(query: str, mode: str, aliases: list[str], max_results: int = 40) -> list[dict]:
-    """Search Europe PMC for nonclinical papers."""
-    base = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+EPMC_NONCLINICAL_KW = (
+    "(preclinical OR nonclinical OR toxicology OR pharmacokinetics OR "
+    "\"animal model\" OR \"in vivo\" OR ADME OR \"drug metabolism\" OR "
+    "\"safety pharmacology\")"
+)
 
-    nonclinical_kw = (
-        "(preclinical OR nonclinical OR toxicology OR pharmacokinetics OR "
-        "\"animal model\" OR \"in vivo\" OR ADME OR \"drug metabolism\" OR "
-        "\"safety pharmacology\")"
-    )
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def search_europe_pmc(query: str, mode: str, aliases: list[str], max_results: int = 40, min_year: int = 2015) -> list[dict]:
+    """Search Europe PMC — newest first, filtered to min_year onwards."""
+    base = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
     if mode == "Drug name":
         all_names = list(dict.fromkeys([query] + (aliases or [])))[:6]
         name_terms = " OR ".join(f'"{n}"' for n in all_names)
-        q = f"({name_terms}) AND {nonclinical_kw}"
+        q = f"({name_terms}) AND {EPMC_NONCLINICAL_KW} AND (PUB_YEAR:[{min_year} TO 3000])"
     elif mode == "Company":
-        q = f'AFFILIATION:"{query}" AND {nonclinical_kw}'
-    else:  # Indication
-        q = f'"{query}" AND {nonclinical_kw}'
+        q = f'AFFILIATION:"{query}" AND {EPMC_NONCLINICAL_KW} AND (PUB_YEAR:[{min_year} TO 3000])'
+    else:
+        q = f'"{query}" AND {EPMC_NONCLINICAL_KW} AND (PUB_YEAR:[{min_year} TO 3000])'
 
     try:
         r = requests.get(base, params={
@@ -217,21 +226,19 @@ def search_europe_pmc(query: str, mode: str, aliases: list[str], max_results: in
             "resultType": "core",
             "pageSize":   max_results,
             "format":     "json",
-            "sort":       "CITED desc",
+            "sort":       "P_PDATE_D desc",   # newest first
         }, timeout=15)
-        data = r.json()
-        results = data.get("resultList", {}).get("result", [])
+        results = r.json().get("resultList", {}).get("result", [])
         return parse_europe_pmc(results)
     except Exception:
         return []
 
 
 def parse_europe_pmc(results: list[dict]) -> list[dict]:
-    """Parse Europe PMC response into standard paper dict."""
     papers = []
     for i, item in enumerate(results):
-        pmid    = item.get("pmid", "")
-        title   = item.get("title", "No title").rstrip(".")
+        pmid     = item.get("pmid", "")
+        title    = item.get("title", "No title").rstrip(".")
         abstract = item.get("abstractText", "") or "No abstract available"
 
         authors_list = (item.get("authorList") or {}).get("author", [])
@@ -244,7 +251,6 @@ def parse_europe_pmc(results: list[dict]) -> list[dict]:
 
         journal = item.get("journalAbbreviation") or item.get("journalTitle", "")
         year    = str(item.get("pubYear", ""))
-        source  = item.get("source", "")  # MED=PubMed, PPR=preprint, PAT=patent, etc.
 
         papers.append({
             "pmid":        pmid,
@@ -257,12 +263,15 @@ def parse_europe_pmc(results: list[dict]) -> list[dict]:
             "category":    "other",
             "confidence":  "low",
             "key_findings": [],
-            "source_db":   "Europe PMC" if not pmid else "PubMed/PMC",
+            "source_db":   "Europe PMC",
         })
     return papers
+
+
 def merge_and_deduplicate(pubmed_papers: list[dict], epmc_papers: list[dict]) -> list[dict]:
-    """Merge PubMed and Europe PMC results, deduplicate by PMID."""
-    seen_pmids = set()
+    """Merge results: PubMed (relevance) first, Europe PMC (newest) fills gaps.
+    Deduplication by PMID. Papers without PMID (preprints) are always included."""
+    seen_pmids: set[str] = set()
     merged = []
 
     for p in pubmed_papers:
@@ -273,7 +282,6 @@ def merge_and_deduplicate(pubmed_papers: list[dict], epmc_papers: list[dict]) ->
 
     for p in epmc_papers:
         pid = p.get("pmid", "")
-        # Include if: no PMID (preprint/patent) or PMID not already in PubMed results
         if not pid or pid not in seen_pmids:
             if pid:
                 seen_pmids.add(pid)
@@ -281,6 +289,7 @@ def merge_and_deduplicate(pubmed_papers: list[dict], epmc_papers: list[dict]) ->
             merged.append(p)
 
     return merged
+
 
 # ══════════════════════════════════════════════════════════════
 # KEYWORD CLASSIFIER
@@ -468,16 +477,21 @@ def sort_papers(papers: list[dict], sort_by: str) -> list[dict]:
 def main():
     # ── Header ───────────────────────────────────────────────
     st.title("🔬 Nonclinical Drug Explorer")
-    st.caption("Preclinical data explorer powered by PubMed · ChEMBL name normalization · Keyword classification")
+    st.caption("Preclinical data explorer · PubMed (relevance) + Europe PMC (newest) · ChEMBL name normalization · Keyword classification")
 
     st.markdown('<div class="disclaimer">Data sourced from publicly available literature (PubMed/PMC). Results may reflect publication bias toward positive findings. GLP nonclinical study reports are not included. Always verify numeric data via the provided PubMed links.</div>', unsafe_allow_html=True)
 
     # ── Sidebar ───────────────────────────────────────────────
     with st.sidebar:
         st.header("Settings")
-        max_results = st.slider("Max papers to fetch", 10, 40, 30, step=10)
-        st.caption("Classification: keyword rule-based (free, no API required)")
-        st.caption("PubMed · ChEMBL · keyword classifier")
+        max_results = st.slider("Max papers per source", 10, 40, 30, step=10)
+        min_year = st.slider("Published from (year)", 2000, 2024, 2015, step=1)
+        st.divider()
+        st.caption("**Search criteria**")
+        st.caption(f"• PubMed: relevance-sorted, {min_year}–present")
+        st.caption(f"• Europe PMC: newest-first, {min_year}–present")
+        st.caption("• Merged & deduplicated by PMID")
+        st.caption("• Classification: keyword rule-based")
 
     # ── Search bar ────────────────────────────────────────────
     col1, col2, col3 = st.columns([3, 1, 1])
@@ -515,22 +529,21 @@ def main():
                     aliases = [a for a in chembl.get("aliases", []) if a and a.lower() != query.lower()]
                     st.write(f"Found: **{chembl['inn']}** ({chembl['chembl_id']}) — {len(aliases)} known aliases")
 
-            # 2. PubMed + Europe PMC
-            st.write("Searching PubMed...")
-            pubmed_papers = search_pubmed(query, mode, aliases, max_results)
+            # 2. PubMed (relevance-sorted) + Europe PMC (newest-first)
+            st.write(f"Searching PubMed — relevance-sorted, {min_year}–present...")
+            pubmed_papers = search_pubmed(query, mode, aliases, max_results, min_year)
 
-            st.write("Searching Europe PMC...")
-            epmc_papers = search_europe_pmc(query, mode, aliases, max_results)
+            st.write(f"Searching Europe PMC — newest-first, {min_year}–present...")
+            epmc_papers = search_europe_pmc(query, mode, aliases, max_results, min_year)
 
             papers = merge_and_deduplicate(pubmed_papers, epmc_papers)
-            st.write(f"PubMed: {len(pubmed_papers)} · Europe PMC: {len(epmc_papers)} → {len(papers)} unique papers")
 
             if not papers:
                 status.update(label="No results", state="error")
                 st.error(f'No public nonclinical literature found for **"{query}"** within the current search scope.')
                 return
 
-            st.write(f"Found **{len(papers)}** papers. Classifying...")
+            st.write(f"PubMed: **{len(pubmed_papers)}** · Europe PMC unique: **{len(epmc_papers) - (len(papers) - len(pubmed_papers))}** added → **{len(papers)}** total")
 
             # 3. Classify (keyword rule-based)
             papers = keyword_classify_all(papers)
@@ -541,6 +554,7 @@ def main():
         st.session_state["chembl"]   = chembl
         st.session_state["query"]    = query
         st.session_state["mode"]     = mode
+        st.session_state["min_year"] = min_year
 
     # ── Render results ────────────────────────────────────────
     if "results" not in st.session_state:
@@ -557,12 +571,20 @@ def main():
     st.subheader(drug_name)
 
     meta_cols = st.columns([1, 1, 1, 2])
-    meta_cols[0].markdown(f'`PubMed-based`')
-    meta_cols[1].markdown(f'`{len(papers)} papers`')
+    meta_cols[0].markdown("`PubMed + Europe PMC`")
+    meta_cols[1].markdown(f"`{len(papers)} papers`")
     if chembl:
-        meta_cols[2].markdown(f'`{chembl["chembl_id"]}`')
+        meta_cols[2].markdown(f"`{chembl['chembl_id']}`")
         if chembl.get("formula"):
-            meta_cols[3].markdown(f'`{chembl["formula"]} · {chembl["mw"]} g/mol`')
+            meta_cols[3].markdown(f"`{chembl['formula']} · {chembl['mw']} g/mol`")
+
+    # Search criteria notice
+    min_year_used = st.session_state.get("min_year", 2015)
+    st.caption(
+        f"Search criteria: PubMed (relevance-sorted, {min_year_used}–present) "
+        f"+ Europe PMC (newest-first, {min_year_used}–present) · merged & deduplicated by PMID · "
+        "keyword rule-based classification · publication bias toward positive results may apply"
+    )
 
     # ChEMBL aliases
     if chembl and aliases:
