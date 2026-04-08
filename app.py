@@ -180,24 +180,32 @@ def parse_pubmed_xml(xml_text: str) -> list[dict]:
         if len(article.findall(".//Author")) > 3:
             authors.append("et al.")
 
-        # Journal — try multiple fields in order
+        # Journal — try dedicated journal fields only (avoid ArticleTitle confusion)
         journal = (
-            getattr(article.find(".//ISOAbbreviation"), "text", "").strip() or
-            getattr(article.find(".//MedlineTA"),       "text", "").strip() or
-            getattr(article.find(".//Journal/Title"),   "text", "").strip() or
-            getattr(article.find(".//Title"),           "text", "").strip()
+            getattr(article.find(".//ISOAbbreviation"),    "text", "").strip() or
+            getattr(article.find(".//MedlineTA"),           "text", "").strip() or
+            getattr(article.find(".//Journal/Title"),       "text", "").strip()
         )
 
-        # Publication status — flag preprints and epub-ahead-of-print
-        pub_status = getattr(article.find(".//PublicationStatus"), "text", "").strip()
-        pub_types  = [el.text or "" for el in article.findall(".//PublicationType")]
-        is_preprint = any("Preprint" in pt for pt in pub_types)
-
+        # If journal still empty, infer publication status
         if not journal:
+            pub_status  = getattr(article.find(".//PublicationStatus"),      "text", "").strip().lower()
+            pub_status2 = getattr(article.find(".//PubmedData/PublicationStatus"), "text", "").strip().lower()
+            pub_types   = [el.text or "" for el in article.findall(".//PublicationType")]
+            combined_status = pub_status + pub_status2
+
+            is_preprint = any(
+                kw in pt.lower() for pt in pub_types
+                for kw in ("preprint", "posted")
+            )
+            is_epub = any(s in combined_status for s in ("aheadofprint", "epublish", "ahead"))
+
             if is_preprint:
                 journal = "Preprint"
-            elif pub_status in ("aheadofprint", "epublish"):
+            elif is_epub:
                 journal = "Epub ahead of print"
+            else:
+                journal = "Journal not yet assigned"
 
         year = (
             getattr(article.find(".//PubDate/Year"),  "text", "") or
@@ -281,11 +289,10 @@ def parse_europe_pmc(results: list[dict]) -> list[dict]:
             item.get("journalTitle",        "").strip() or
             item.get("journal",             "").strip()
         )
-        # Flag preprints explicitly
         if not journal:
             src_field = item.get("source", "")
-            pub_model = item.get("pubTypeList", {})
-            if src_field in ("PPR",) or "Preprint" in str(pub_model):
+            pub_types = str(item.get("pubTypeList", ""))
+            if src_field == "PPR" or "preprint" in pub_types.lower():
                 journal = "Preprint"
             else:
                 journal = "Epub ahead of print"
@@ -595,7 +602,7 @@ def render_paper(p: dict):
         {pubmed_link}
         <span style="font-size:12px;color:#5a5a56;">👤 {p["authors"] or "No author info"}</span>
         <span style="font-size:12px;color:#5a5a56;">📅 {p["year"] or "—"}</span>
-        <span style="font-size:12px;color:{'#0a4080' if p['journal'] in ('Preprint',) else '#9a5000' if p['journal'] == 'Epub ahead of print' else '#5a5a56'};font-style:italic;">
+        <span style="font-size:12px;color:{'#0a4080' if p['journal'] == 'Preprint' else '#9a5000' if p['journal'] in ('Epub ahead of print', 'Journal not yet assigned') else '#5a5a56'};font-style:italic;">
           📖 {p["journal"] or "—"}
         </span>
       </div>
