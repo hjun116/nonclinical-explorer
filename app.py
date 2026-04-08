@@ -453,7 +453,7 @@ def render_paper(p: dict):
     if findings:
         rows = "".join(
             f'<tr>'
-            f'<td style="font-size:11px;color:#888;padding:2px 14px 2px 0;white-space:nowrap;">{f["key"]}</td>'
+            f'<td style="font-size:11px;color:#888;padding:2px 16px 2px 0;white-space:nowrap;">{f["key"]}</td>'
             f'<td style="font-size:12px;font-weight:500;color:#1a1a18;padding:2px 0;">{f["val"]}</td>'
             f'</tr>'
             for f in findings
@@ -474,17 +474,23 @@ def render_paper(p: dict):
 
     st.markdown(f"""
     <div class="paper-card">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:5px;">
-        <div style="font-size:14px;font-weight:500;line-height:1.4;flex:1;">{p["title"]}</div>
-        <span class="cat-badge {cat_class}">{cat_label}</span>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:8px;">
+        <div style="font-size:15px;font-weight:600;line-height:1.4;flex:1;color:#1a1a18;">{p["title"]}</div>
+        <span class="cat-badge {cat_class}" style="flex-shrink:0;">{cat_label}</span>
       </div>
-      <div style="font-size:12px;color:#9a9a94;margin-bottom:10px;">
-        {p["authors"] or "No author info"}{" · " + p["year"] if p["year"] else ""} · {p["journal"]}
+      <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:12px;">
+        <span style="font-size:12px;color:#5a5a56;">
+          👤 {p["authors"] or "No author info"}
+        </span>
+        <span style="font-size:12px;color:#5a5a56;">
+          📅 {p["year"] or "—"}
+        </span>
+        <span style="font-size:12px;color:#5a5a56;font-style:italic;">
+          📖 {p["journal"] or "—"}
+        </span>
       </div>
-      {findings_html}
-      <div style="font-size:13px;color:#5a5a56;line-height:1.6;margin-bottom:10px;
-                  border-left:3px solid #f0efeb;padding-left:10px;">
-        {p["abstract"][:400]}{"..." if len(p["abstract"]) > 400 else ""}
+      <div style="border-top:1px solid #f0efeb;padding-top:10px;margin-bottom:10px;">
+        {findings_html}
       </div>
       <div style="font-size:11px;color:#b0a090;margin-bottom:8px;font-style:italic;">
         ⚠ Extracted values are based on abstract text only. Always refer to the full paper for complete and verified data.
