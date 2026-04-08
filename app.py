@@ -333,50 +333,86 @@ SPECIES_PATTERNS = [
     (r"\b(monkey|cynomolgus|rhesus|primate|NHP)\b",       "Monkey"),
     (r"\b(dog|dogs|beagle|canine)\b",                     "Dog"),
     (r"\b(rabbit|rabbits)\b",                             "Rabbit"),
-    (r"\b(hamster|guinea pig|minipig|swine)\b",           "Other"),
+    (r"\b(hamster|guinea pig|minipig|swine|pig)\b",       "Other"),
 ]
 
-METRIC_PATTERNS = [
-    r"(?:noael|loael)[^a-z\d]{0,10}(\d[\d.,]*\s*mg\/kg[^\s,;.]*)",
-    r"(?:ld50|lc50)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:mg\/kg|μg\/ml)[^\s,;.]*)",
-    r"(?:ic50|ec50|ki)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:n[Mm]|μ[Mm])[^\s,;.]*)",
-    r"(?:bioavailability|oral\s+f)[^a-z\d]{0,10}(\d[\d.,]*\s*%)",
-    r"(?:half.life|t½|t1\/2)[^a-z\d]{0,10}(\d[\d.,]*\s*h(?:ours?)?)",
+# ── Category-specific extraction patterns ─────────────────────
+SAFETY_PATTERNS = [
+    ("NOAEL/NOEL",   r"(?:noael|noel|no.observed.adverse.effect.level)[^a-z\d]{0,15}(\d[\d.,]*\s*mg\/kg[^\s,;.]*)"),
+    ("LOAEL",        r"(?:loael|lowest.observed.adverse.effect.level)[^a-z\d]{0,15}(\d[\d.,]*\s*mg\/kg[^\s,;.]*)"),
+    ("LD50",         r"(?:ld50|lethal dose)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:mg\/kg|μg\/kg)[^\s,;.]*)"),
+    ("Duration",     r"(\d+[.\-]?(?:day|week|month)[s]?(?:\s+(?:repeat|repeated|oral|iv|dosing))?)"),
+    ("Tox finding",  r"\b(hepatotox\w*|nephrotox\w*|cardiotox\w*|neurotox\w*|genotox\w*|hepatic\s+(?:injury|damage|failure))\b"),
 ]
 
+PK_PATTERNS = [
+    ("Cmax",   r"(?:cmax|c\s*max|peak\s+concentration)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:ng|μg|µg)[\s·/]?(?:m[Ll]|L)[^\s,;.]*)"),
+    ("AUC",    r"(?:auc(?:0.∞|0-inf|0-t|last)?)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:ng|μg|µg)[\s·•/]?h[\s·•/]?(?:m[Ll]|L)[^\s,;.]*)"),
+    ("t½",     r"(?:half.life|t½|t1\/2)[^a-z\d]{0,10}(\d[\d.,]*\s*h(?:ours?)?)"),
+    ("F%",     r"(?:bioavailability|oral\s+(?:bioavailability|f))[^a-z\d]{0,10}(\d[\d.,]*\s*%)"),
+    ("CL",     r"(?:clearance|cl)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:ml|L)[\s·/](?:min|h)[\s·/]?(?:kg)?[^\s,;.]*)"),
+]
 
-def keyword_classify(paper: dict) -> dict:
-    title    = paper["title"].lower()
-    abstract = paper["abstract"].lower()
-    for cat, rule in RULES.items():
-        t_hit = any(kw in title    for kw in rule["title"])
-        a_hit = any(kw in abstract for kw in rule["abstract"])
-        if t_hit and a_hit: return {"category": cat, "confidence": "high"}
-        if t_hit or  a_hit: return {"category": cat, "confidence": "low"}
-    return {"category": "other", "confidence": "low"}
+PD_PATTERNS = [
+    ("IC50",       r"(?:ic50)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:n[Mm]|μ[Mm]|µ[Mm]|p[Mm])[^\s,;.]*)"),
+    ("EC50",       r"(?:ec50)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:n[Mm]|μ[Mm]|µ[Mm])[^\s,;.]*)"),
+    ("Ki",         r"(?:\bki\b)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:n[Mm]|μ[Mm]|µ[Mm])[^\s,;.]*)"),
+    ("Selectivity",r"(?:selectivity|selective)[^a-z\d]{0,15}(\d[\d.,]*[\s-]?fold[^\s,;.]*)"),
+]
+
+EFFICACY_PATTERNS = [
+    ("Model",        r"\b(xenograft|PDX|syngeneic|orthotopic|allograft|transgenic|knock.?out|induced\s+model)\b"),
+    ("Tumor inhib.", r"(?:tumor|tumour)\s+(?:growth\s+)?(?:inhibition|reduction|suppression)[^a-z\d]{0,10}(\d[\d.,]*\s*%)"),
+    ("Survival",     r"(?:survival|overall\s+survival)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:%|days?|weeks?)[^\s,;.]*)"),
+    ("ED50/TGI",     r"(?:ed50|tgi|tumor\s+growth\s+inhibition)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:mg\/kg|%)[^\s,;.]*)"),
+]
+
+CAT_PATTERNS = {
+    "safety":   SAFETY_PATTERNS,
+    "pk":       PK_PATTERNS,
+    "pd":       PD_PATTERNS,
+    "efficacy": EFFICACY_PATTERNS,
+}
 
 
-def extract_findings(paper: dict) -> list[dict]:
-    text = paper["abstract"]
-    findings = []
+def extract_species(text: str) -> Optional[str]:
     for pattern, label in SPECIES_PATTERNS:
         if re.search(pattern, text, re.I):
-            findings.append({"key": "Species", "val": label})
-            break
-    for pat in METRIC_PATTERNS:
+            return label
+    return None
+
+
+def extract_findings(text: str, category: str) -> list[dict]:
+    """Extract category-specific key findings from abstract text."""
+    findings = []
+
+    # Species — relevant for safety, pk, efficacy
+    if category in ("safety", "pk", "efficacy", "other"):
+        sp = extract_species(text)
+        if sp:
+            findings.append({"key": "Species", "val": sp})
+
+    # Category-specific metrics
+    patterns = CAT_PATTERNS.get(category, [])
+    for label, pat in patterns:
         m = re.search(pat, text, re.I)
         if m:
-            findings.append({"key": "Key metric", "val": m.group(0).strip()})
-            break
+            val = (m.group(1) if m.lastindex else m.group(0)).strip()
+            # Clean up whitespace
+            val = re.sub(r"\s+", " ", val).strip(" ,;.")
+            if val:
+                findings.append({"key": label, "val": val})
+
     return findings
 
 
 def keyword_classify_all(papers: list[dict]) -> list[dict]:
     for p in papers:
         r = keyword_classify(p)
-        p["category"]    = r["category"]
-        p["confidence"]  = r["confidence"]
-        p["key_findings"] = extract_findings(p)
+        p["category"]     = r["category"]
+        p["confidence"]   = r["confidence"]
+        # Extract after category is known so patterns are category-specific
+        p["key_findings"] = extract_findings(p["abstract"], p["category"])
     return papers
 
 
@@ -399,24 +435,50 @@ CAT_CSS = {
 def render_paper(p: dict):
     cat_label = CAT_LABELS.get(p["category"], "Other")
     cat_class = CAT_CSS.get(p["category"], "cat-other")
-    conf_tag  = '<span class="conf-low">Verify with source</span>' if p["confidence"] == "low" else ""
+    conf_tag  = '<span class="conf-low">⚠ Verify with source</span>' if p["confidence"] == "low" else ""
 
-    findings_html = ""
-    for f in p.get("key_findings", []):
-        findings_html += f'<span style="font-size:12px;color:#888;margin-right:6px;">{f["key"]}:</span><span style="font-size:12px;font-weight:500;margin-right:16px;">{f["val"]}</span>'
+    # Key findings as a small grid table
+    findings = p.get("key_findings", [])
+    if findings:
+        rows = "".join(
+            f'<tr>'
+            f'<td style="font-size:11px;color:#888;padding:2px 14px 2px 0;white-space:nowrap;">{f["key"]}</td>'
+            f'<td style="font-size:12px;font-weight:500;color:#1a1a18;padding:2px 0;">{f["val"]}</td>'
+            f'</tr>'
+            for f in findings
+        )
+        findings_html = f'<table style="border-collapse:collapse;margin-bottom:10px;">{rows}</table>'
+    else:
+        findings_html = '<div style="font-size:12px;color:#bbb;margin-bottom:10px;font-style:italic;">No structured data extracted from abstract</div>'
 
-    pubmed_link = f'<a href="https://pubmed.ncbi.nlm.nih.gov/{p["pmid"]}/" target="_blank" style="font-size:12px;color:#1a1a18;border:1px solid #ddd;border-radius:5px;padding:3px 9px;text-decoration:none;">PubMed →</a>' if p["pmid"] else ""
+    source_db_tag = ""
+    if p.get("source_db") and p["source_db"] != "PubMed":
+        source_db_tag = f'<span style="font-size:11px;color:#0a4080;background:#ddeeff;padding:2px 7px;border-radius:4px;margin-right:6px;">{p["source_db"]}</span>'
+
+    pubmed_link = (
+        f'<a href="https://pubmed.ncbi.nlm.nih.gov/{p["pmid"]}/" target="_blank" '
+        f'style="font-size:12px;color:#1a1a18;border:1px solid #ddd;border-radius:5px;'
+        f'padding:3px 9px;text-decoration:none;">Full record →</a>'
+    ) if p["pmid"] else ""
 
     st.markdown(f"""
     <div class="paper-card">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:6px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:5px;">
         <div style="font-size:14px;font-weight:500;line-height:1.4;flex:1;">{p["title"]}</div>
         <span class="cat-badge {cat_class}">{cat_label}</span>
       </div>
-      <div style="font-size:12px;color:#9a9a94;margin-bottom:6px;">{p["authors"] or "No author info"}{" · " + p["year"] if p["year"] else ""} · {p["journal"]}</div>
-      {f'<div style="margin-bottom:8px;">{findings_html}</div>' if findings_html else ""}
-      <div style="font-size:13px;color:#5a5a56;line-height:1.6;margin-bottom:10px;">{p["abstract"][:400]}{"..." if len(p["abstract"]) > 400 else ""}</div>
-      <div style="display:flex;gap:8px;align-items:center;">{conf_tag}{pubmed_link}</div>
+      <div style="font-size:12px;color:#9a9a94;margin-bottom:10px;">
+        {p["authors"] or "No author info"}{" · " + p["year"] if p["year"] else ""} · {p["journal"]}
+      </div>
+      {findings_html}
+      <div style="font-size:13px;color:#5a5a56;line-height:1.6;margin-bottom:10px;
+                  border-left:3px solid #f0efeb;padding-left:10px;">
+        {p["abstract"][:400]}{"..." if len(p["abstract"]) > 400 else ""}
+      </div>
+      <div style="font-size:11px;color:#b0a090;margin-bottom:8px;font-style:italic;">
+        ⚠ Extracted values are based on abstract text only. Always refer to the full paper for complete and verified data.
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">{source_db_tag}{conf_tag}{pubmed_link}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -479,7 +541,18 @@ def main():
     st.title("🔬 Nonclinical Drug Explorer")
     st.caption("Preclinical data explorer · PubMed (relevance) + Europe PMC (newest) · ChEMBL name normalization · Keyword classification")
 
-    st.markdown('<div class="disclaimer">Data sourced from publicly available literature (PubMed/PMC). Results may reflect publication bias toward positive findings. GLP nonclinical study reports are not included. Always verify numeric data via the provided PubMed links.</div>', unsafe_allow_html=True)
+    st.markdown("""
+<div style="background:#fffbf0;border:1px solid #f0d080;border-radius:10px;padding:14px 18px;margin-bottom:1.2rem;">
+  <div style="font-size:13px;font-weight:600;color:#7a5000;margin-bottom:8px;">⚠ Important — Please read before use</div>
+  <div style="font-size:12px;color:#7a5000;line-height:1.9;">
+    ✅ &nbsp;Data is sourced from <strong>publicly available literature only</strong> (PubMed / Europe PMC).<br>
+    ✅ &nbsp;Results may reflect <strong>publication bias</strong> — positive findings are more likely to be published.<br>
+    ✅ &nbsp;<strong>GLP nonclinical study reports</strong> are confidential and are <u>not</u> included in this tool.<br>
+    ✅ &nbsp;Extracted values (NOAEL, Cmax, IC50, etc.) are parsed from <strong>abstract text only</strong> and may be incomplete.<br>
+    ✅ &nbsp;<strong>Always verify all data by accessing the original publication</strong> via the provided links.
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
     # ── Sidebar ───────────────────────────────────────────────
     with st.sidebar:
