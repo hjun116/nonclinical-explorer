@@ -417,6 +417,65 @@ def keyword_classify(paper: dict) -> dict:
     return {"category": "other", "confidence": "low"}
 
 
+# ── In vivo detection ─────────────────────────────────────────
+# Positive signals: words that strongly indicate animal experiment
+IN_VIVO_POSITIVE = [
+    r"\b(mice|mouse|murine|rats?|rodent)\b",
+    r"\b(cynomolgus|rhesus|monkey|primate|NHP)\b",
+    r"\b(beagle|canine|dogs?)\b",
+    r"\b(rabbit|hamster|guinea\s+pig|minipig|swine)\b",
+    r"\bin\s+vivo\b",
+    r"\banimal\s+(model|study|experiment|stud)\b",
+    r"\b(xenograft|allograft|syngeneic|orthotopic)\b",
+    r"\b(oral\s+(?:dosing|administration|gavage)|intravenous(?:ly)?|subcutaneous(?:ly)?)\b",
+    r"\b(repeated.dose|single.dose|dose.escalation)\s+(?:study|tox)",
+    r"\b(pharmacokinetics?\s+in|pk\s+in)\s+(?:rats?|mice|dogs?|monkey)",
+]
+
+# Negative signals: words that suggest in vitro / cell-only study
+IN_VITRO_NEGATIVE = [
+    r"\bcell\s+line\b",
+    r"\bin\s+vitro\b",
+    r"\bcell\s+culture\b",
+    r"\b(hela|mcf.7|a549|hek293|jurkat|thp.?1|hct116)\b",
+    r"\b(transfect|siRNA|shRNA|CRISPR)\b",
+]
+
+
+def detect_in_vivo(paper: dict) -> dict:
+    """
+    Returns {"in_vivo": True/False, "in_vivo_confidence": "confirmed"/"likely"/"unlikely"}.
+
+    Logic:
+      - Any positive signal found → candidate
+      - If species extracted (from key_findings) → confirmed
+      - Negative-only (no positive) → unlikely (in vitro)
+      - Mixed (positive + negative) → likely (both, but animal data present)
+    """
+    text = (paper.get("title", "") + " " + paper.get("abstract", "")).lower()
+
+    pos_hits = sum(1 for pat in IN_VIVO_POSITIVE  if re.search(pat, text, re.I))
+    neg_hits = sum(1 for pat in IN_VITRO_NEGATIVE if re.search(pat, text, re.I))
+
+    # Species already extracted = strong confirmation
+    has_species = any(f["key"] == "Species" for f in paper.get("key_findings", []))
+
+    if has_species or pos_hits >= 2:
+        confidence = "confirmed"
+        in_vivo = True
+    elif pos_hits == 1 and neg_hits == 0:
+        confidence = "likely"
+        in_vivo = True
+    elif pos_hits >= 1 and neg_hits >= 1:
+        confidence = "likely"   # mixed — animal data probably present
+        in_vivo = True
+    else:
+        confidence = "unlikely"
+        in_vivo = False
+
+    return {"in_vivo": in_vivo, "in_vivo_confidence": confidence}
+
+
 def keyword_classify_all(papers: list[dict]) -> list[dict]:
     for p in papers:
         r = keyword_classify(p)
@@ -424,6 +483,10 @@ def keyword_classify_all(papers: list[dict]) -> list[dict]:
         p["confidence"]   = r["confidence"]
         # Extract after category is known so patterns are category-specific
         p["key_findings"] = extract_findings(p["abstract"], p["category"])
+        # Attach in_vivo flag (uses key_findings, so must come after)
+        iv = detect_in_vivo(p)
+        p["in_vivo"]            = iv["in_vivo"]
+        p["in_vivo_confidence"] = iv["in_vivo_confidence"]
     return papers
 
 
@@ -447,6 +510,15 @@ def render_paper(p: dict):
     cat_label = CAT_LABELS.get(p["category"], "Other")
     cat_class = CAT_CSS.get(p["category"], "cat-other")
     conf_tag  = '<span class="conf-low">⚠ Verify with source</span>' if p["confidence"] == "low" else ""
+
+    # In vivo badge
+    iv_conf = p.get("in_vivo_confidence", "unlikely")
+    if iv_conf == "confirmed":
+        iv_badge = '<span style="font-size:11px;background:#e6f5d8;color:#2a6010;padding:2px 8px;border-radius:4px;font-weight:500;">🐭 In vivo confirmed</span>'
+    elif iv_conf == "likely":
+        iv_badge = '<span style="font-size:11px;background:#fff3d0;color:#7a5000;padding:2px 8px;border-radius:4px;">🐭 In vivo likely</span>'
+    else:
+        iv_badge = '<span style="font-size:11px;background:#f5f5f5;color:#aaa;padding:2px 8px;border-radius:4px;">⚗ In vitro / unclear</span>'
 
     # Key findings as a small grid table
     findings = p.get("key_findings", [])
@@ -495,7 +567,7 @@ def render_paper(p: dict):
       <div style="font-size:11px;color:#b0a090;margin-bottom:8px;font-style:italic;">
         ⚠ Extracted values are based on abstract text only. Always refer to the full paper for complete and verified data.
       </div>
-      <div style="display:flex;gap:8px;align-items:center;">{source_db_tag}{conf_tag}{pubmed_link}</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">{iv_badge}{source_db_tag}{conf_tag}{pubmed_link}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -523,8 +595,10 @@ def render_tab(papers: list[dict], cat: str):
 # ══════════════════════════════════════════════════════════════
 # FILTERS
 # ══════════════════════════════════════════════════════════════
-def apply_filters(papers: list[dict], year: str, species: str, keyword: str, conf: str) -> list[dict]:
+def apply_filters(papers: list[dict], year: str, species: str, keyword: str, conf: str, in_vivo_only: bool = True) -> list[dict]:
     out = papers
+    if in_vivo_only:
+        out = [p for p in out if p.get("in_vivo", False)]
     if year:
         out = [p for p in out if p["year"] == year]
     if species:
@@ -576,6 +650,13 @@ def main():
         st.header("Settings")
         max_results = st.slider("Max papers per source", 10, 40, 30, step=10)
         min_year = st.slider("Published from (year)", 2000, 2024, 2015, step=1)
+        st.divider()
+        st.caption("**Study type**")
+        in_vivo_only = st.toggle(
+            "Animal studies only",
+            value=True,
+            help="Show only papers with confirmed or likely in vivo / animal data. Turn off to include in vitro / cell studies."
+        )
         st.divider()
         st.caption("**Search criteria**")
         st.caption(f"• PubMed: relevance-sorted, {min_year}–present")
@@ -700,16 +781,34 @@ def main():
 
     filtered = apply_filters(
         papers,
-        year    = "" if f_year    == "All" else f_year,
-        species = "" if f_species == "All" else f_species,
-        keyword = f_keyword,
-        conf    = "" if f_conf    == "All" else f_conf,
+        year       = "" if f_year    == "All" else f_year,
+        species    = "" if f_species == "All" else f_species,
+        keyword    = f_keyword,
+        conf       = "" if f_conf    == "All" else f_conf,
+        in_vivo_only = in_vivo_only,
     )
     filtered = sort_papers(filtered, f_sort)
-    st.caption(f"{len(filtered)} papers shown")
+
+    total_iv  = sum(1 for p in papers if p.get("in_vivo", False))
+    shown_msg = f"{len(filtered)} papers shown"
+    if in_vivo_only:
+        shown_msg += f" (animal studies only · {total_iv}/{len(papers)} total detected)"
+    else:
+        shown_msg += f" (all studies · {total_iv}/{len(papers)} with animal data)"
+    st.caption(shown_msg)
 
     # ── Category tabs ─────────────────────────────────────────
-    tabs = st.tabs(["All", "Safety / Tox", "PK / ADME", "PD / MOA", "In vivo Efficacy"])
+    def cat_count(cat):
+        pool = filtered if cat == "all" else [p for p in filtered if p["category"] == cat]
+        return len(pool)
+
+    tabs = st.tabs([
+        f"All ({cat_count('all')})",
+        f"Safety / Tox ({cat_count('safety')})",
+        f"PK / ADME ({cat_count('pk')})",
+        f"PD / MOA ({cat_count('pd')})",
+        f"In vivo Efficacy ({cat_count('efficacy')})",
+    ])
     cat_keys = ["all", "safety", "pk", "pd", "efficacy"]
     for tab, cat in zip(tabs, cat_keys):
         with tab:
