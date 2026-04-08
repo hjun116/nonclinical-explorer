@@ -382,23 +382,22 @@ def extract_species(text: str) -> Optional[str]:
     return None
 
 
-def extract_findings(text: str, category: str) -> list[dict]:
-    """Extract category-specific key findings from abstract text."""
+def extract_findings(text: str, category: str, title: str = "") -> list[dict]:
+    """Extract category-specific key findings from abstract + title text."""
     findings = []
 
-    # Species — relevant for safety, pk, efficacy
-    if category in ("safety", "pk", "efficacy", "other"):
-        sp = extract_species(text)
-        if sp:
-            findings.append({"key": "Species", "val": sp})
+    # Species — extract for ALL categories using title + abstract combined
+    full_text = (title + " " + text).strip()
+    sp = extract_species(full_text)
+    if sp:
+        findings.append({"key": "Species", "val": sp})
 
-    # Category-specific metrics
+    # Category-specific metrics (abstract text only)
     patterns = CAT_PATTERNS.get(category, [])
     for label, pat in patterns:
         m = re.search(pat, text, re.I)
         if m:
             val = (m.group(1) if m.lastindex else m.group(0)).strip()
-            # Clean up whitespace
             val = re.sub(r"\s+", " ", val).strip(" ,;.")
             if val:
                 findings.append({"key": label, "val": val})
@@ -482,7 +481,7 @@ def keyword_classify_all(papers: list[dict]) -> list[dict]:
         p["category"]     = r["category"]
         p["confidence"]   = r["confidence"]
         # Extract after category is known so patterns are category-specific
-        p["key_findings"] = extract_findings(p["abstract"], p["category"])
+        p["key_findings"] = extract_findings(p["abstract"], p["category"], p.get("title", ""))
         # Attach in_vivo flag (uses key_findings, so must come after)
         iv = detect_in_vivo(p)
         p["in_vivo"]            = iv["in_vivo"]
