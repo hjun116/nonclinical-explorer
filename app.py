@@ -188,6 +188,99 @@ def parse_pubmed_xml(xml_text: str) -> list[dict]:
         })
     return papers
 
+# ══════════════════════════════════════════════════════════════
+# EUROPE PMC SEARCH
+# ══════════════════════════════════════════════════════════════
+@st.cache_data(ttl=1800, show_spinner=False)
+def search_europe_pmc(query: str, mode: str, aliases: list[str], max_results: int = 40) -> list[dict]:
+    """Search Europe PMC for nonclinical papers."""
+    base = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+
+    nonclinical_kw = (
+        "(preclinical OR nonclinical OR toxicology OR pharmacokinetics OR "
+        "\"animal model\" OR \"in vivo\" OR ADME OR \"drug metabolism\" OR "
+        "\"safety pharmacology\")"
+    )
+
+    if mode == "Drug name":
+        all_names = list(dict.fromkeys([query] + (aliases or [])))[:6]
+        name_terms = " OR ".join(f'"{n}"' for n in all_names)
+        q = f"({name_terms}) AND {nonclinical_kw}"
+    elif mode == "Company":
+        q = f'AFFILIATION:"{query}" AND {nonclinical_kw}'
+    else:  # Indication
+        q = f'"{query}" AND {nonclinical_kw}'
+
+    try:
+        r = requests.get(base, params={
+            "query":      q,
+            "resultType": "core",
+            "pageSize":   max_results,
+            "format":     "json",
+            "sort":       "CITED desc",
+        }, timeout=15)
+        data = r.json()
+        results = data.get("resultList", {}).get("result", [])
+        return parse_europe_pmc(results)
+    except Exception:
+        return []
+
+
+def parse_europe_pmc(results: list[dict]) -> list[dict]:
+    """Parse Europe PMC response into standard paper dict."""
+    papers = []
+    for i, item in enumerate(results):
+        pmid    = item.get("pmid", "")
+        title   = item.get("title", "No title").rstrip(".")
+        abstract = item.get("abstractText", "") or "No abstract available"
+
+        authors_list = (item.get("authorList") or {}).get("author", [])
+        authors = [
+            f'{a.get("lastName", "")} {a.get("initials", "")}'.strip()
+            for a in authors_list[:3] if a.get("lastName")
+        ]
+        if len(authors_list) > 3:
+            authors.append("et al.")
+
+        journal = item.get("journalAbbreviation") or item.get("journalTitle", "")
+        year    = str(item.get("pubYear", ""))
+        source  = item.get("source", "")  # MED=PubMed, PPR=preprint, PAT=patent, etc.
+
+        papers.append({
+            "pmid":        pmid,
+            "title":       title,
+            "abstract":    abstract,
+            "authors":     ", ".join(authors),
+            "journal":     journal,
+            "year":        year,
+            "raw_index":   i,
+            "category":    "other",
+            "confidence":  "low",
+            "key_findings": [],
+            "source_db":   "Europe PMC" if not pmid else "PubMed/PMC",
+        })
+    return papers
+def merge_and_deduplicate(pubmed_papers: list[dict], epmc_papers: list[dict]) -> list[dict]:
+    """Merge PubMed and Europe PMC results, deduplicate by PMID."""
+    seen_pmids = set()
+    merged = []
+
+    for p in pubmed_papers:
+        pid = p.get("pmid", "")
+        if pid:
+            seen_pmids.add(pid)
+        merged.append(p)
+
+    for p in epmc_papers:
+        pid = p.get("pmid", "")
+        # Include if: no PMID (preprint/patent) or PMID not already in PubMed results
+        if not pid or pid not in seen_pmids:
+            if pid:
+                seen_pmids.add(pid)
+            p["raw_index"] = len(merged)
+            merged.append(p)
+
+    return merged
 
 # ══════════════════════════════════════════════════════════════
 # KEYWORD CLASSIFIER
@@ -422,9 +515,15 @@ def main():
                     aliases = [a for a in chembl.get("aliases", []) if a and a.lower() != query.lower()]
                     st.write(f"Found: **{chembl['inn']}** ({chembl['chembl_id']}) — {len(aliases)} known aliases")
 
-            # 2. PubMed
+            # 2. PubMed + Europe PMC
             st.write("Searching PubMed...")
-            papers = search_pubmed(query, mode, aliases, max_results)
+            pubmed_papers = search_pubmed(query, mode, aliases, max_results)
+
+            st.write("Searching Europe PMC...")
+            epmc_papers = search_europe_pmc(query, mode, aliases, max_results)
+
+            papers = merge_and_deduplicate(pubmed_papers, epmc_papers)
+            st.write(f"PubMed: {len(pubmed_papers)} · Europe PMC: {len(epmc_papers)} → {len(papers)} unique papers")
 
             if not papers:
                 status.update(label="No results", state="error")
