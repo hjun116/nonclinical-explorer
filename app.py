@@ -151,14 +151,23 @@ def search_pubmed(query: str, mode: str, aliases: list[str], max_results: int = 
     return parse_pubmed_xml(r.text)
 
 
+def _xml_text(el) -> str:
+    """Extract all text from an XML element including mixed content (e.g. <i> tags)."""
+    if el is None:
+        return ""
+    return re.sub(r"<[^>]+>", "", ET.tostring(el, encoding="unicode")).strip()
+
+
 def parse_pubmed_xml(xml_text: str) -> list[dict]:
     root = ET.fromstring(xml_text)
     papers = []
     for i, article in enumerate(root.findall(".//PubmedArticle")):
         pmid  = getattr(article.find(".//PMID"), "text", "")
-        title = getattr(article.find(".//ArticleTitle"), "text", "No title") or "No title"
 
-        abstract_parts = [el.text or "" for el in article.findall(".//AbstractText")]
+        # Title — strip HTML tags (e.g. <i>Caenorhabditis</i>)
+        title = _xml_text(article.find(".//ArticleTitle")) or "No title"
+
+        abstract_parts = [_xml_text(el) for el in article.findall(".//AbstractText")]
         abstract = " ".join(abstract_parts).strip() or "No abstract available"
 
         author_nodes = article.findall(".//Author")[:3]
@@ -171,13 +180,18 @@ def parse_pubmed_xml(xml_text: str) -> list[dict]:
         if len(article.findall(".//Author")) > 3:
             authors.append("et al.")
 
+        # Journal — try multiple fields in order
         journal = (
-            getattr(article.find(".//ISOAbbreviation"), "text", "") or
-            getattr(article.find(".//Title"), "text", "")
+            getattr(article.find(".//ISOAbbreviation"), "text", "").strip() or
+            getattr(article.find(".//MedlineTA"),       "text", "").strip() or
+            getattr(article.find(".//Journal/Title"),   "text", "").strip() or
+            getattr(article.find(".//Title"),           "text", "").strip()
         )
+
         year = (
-            getattr(article.find(".//PubDate/Year"), "text", "") or
-            (getattr(article.find(".//MedlineDate"), "text", "") or "")[:4]
+            getattr(article.find(".//PubDate/Year"),  "text", "") or
+            getattr(article.find(".//PubDate/MedlineDate"), "text", "")[:4] or
+            ""
         )
 
         papers.append({
@@ -238,8 +252,10 @@ def parse_europe_pmc(results: list[dict]) -> list[dict]:
     papers = []
     for i, item in enumerate(results):
         pmid     = item.get("pmid", "")
-        title    = item.get("title", "No title").rstrip(".")
-        abstract = item.get("abstractText", "") or "No abstract available"
+        # Strip any HTML tags from title
+        raw_title = item.get("title", "No title").rstrip(".")
+        title     = re.sub(r"<[^>]+>", "", raw_title).strip() or "No title"
+        abstract  = item.get("abstractText", "") or "No abstract available"
 
         authors_list = (item.get("authorList") or {}).get("author", [])
         authors = [
@@ -249,8 +265,12 @@ def parse_europe_pmc(results: list[dict]) -> list[dict]:
         if len(authors_list) > 3:
             authors.append("et al.")
 
-        journal = item.get("journalAbbreviation") or item.get("journalTitle", "")
-        year    = str(item.get("pubYear", ""))
+        journal = (
+            item.get("journalAbbreviation", "").strip() or
+            item.get("journalTitle",        "").strip() or
+            item.get("journal",             "").strip()
+        )
+        year = str(item.get("pubYear", ""))
 
         papers.append({
             "pmid":        pmid,
