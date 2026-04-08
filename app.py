@@ -719,6 +719,7 @@ def main():
 
         st.session_state["results"]  = papers
         st.session_state["chembl"]   = chembl
+        st.session_state["aliases"]  = aliases
         st.session_state["query"]    = query
         st.session_state["mode"]     = mode
         st.session_state["min_year"] = min_year
@@ -729,6 +730,7 @@ def main():
 
     papers  = st.session_state["results"]
     chembl  = st.session_state.get("chembl")
+    aliases = st.session_state.get("aliases", [])
     q_label = st.session_state.get("query", query)
 
     st.divider()
