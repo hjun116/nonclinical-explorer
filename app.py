@@ -1,0 +1,518 @@
+"""
+Nonclinical Drug Explorer
+─────────────────────────
+APIs used (all free, no key required):
+  • PubMed E-utilities  — https://eutils.ncbi.nlm.nih.gov/
+  • ChEMBL REST API     — https://www.ebi.ac.uk/chembl/api/data/
+
+Classification: keyword rule-based (no external API)
+Deploy: Streamlit Cloud — push to GitHub, connect repo, done.
+"""
+
+import streamlit as st
+import requests
+import xml.etree.ElementTree as ET
+import re
+from typing import Optional
+
+# ── Page config ───────────────────────────────────────────────
+st.set_page_config(
+    page_title="Nonclinical Drug Explorer",
+    page_icon="🔬",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ── Minimal custom CSS ─────────────────────────────────────────
+st.markdown("""
+<style>
+  .block-container { padding-top: 2rem; max-width: 960px; }
+  .stTabs [data-baseweb="tab"] { font-size: 14px; }
+  div[data-testid="metric-container"] { background: #f7f7f5; border-radius: 8px; padding: 12px; }
+  .paper-card {
+    border: 1px solid #e8e8e4;
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 10px;
+    background: #fff;
+  }
+  .cat-badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+  .cat-safety  { background:#fde8e8; color:#8b1a1a; }
+  .cat-pk      { background:#fef3d8; color:#7a4e00; }
+  .cat-pd      { background:#ddeeff; color:#0a4080; }
+  .cat-eff     { background:#e6f5d8; color:#2a6010; }
+  .cat-other   { background:#f0efeb; color:#5a5a56; }
+  .conf-low    { background:#fff3d0; color:#7a5000; font-size:11px; padding:2px 7px; border-radius:4px; }
+  .disclaimer  { font-size:12px; color:#9a9a94; border-left:3px solid #e0e0d8; padding-left:10px; margin-bottom:1rem; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════
+# CHEMBL RESOLVER
+# ══════════════════════════════════════════════════════════════
+@st.cache_data(ttl=3600, show_spinner=False)
+def resolve_chembl(query: str) -> Optional[dict]:
+    """Resolve drug name → ChEMBL data including all synonyms."""
+    base = "https://www.ebi.ac.uk/chembl/api/data"
+    headers = {"Accept": "application/json"}
+
+    # 1. Exact preferred name
+    try:
+        r = requests.get(
+            f"{base}/molecule",
+            params={"pref_name__iexact": query, "format": "json"},
+            headers=headers, timeout=10
+        )
+        data = r.json()
+        mol = (data.get("molecules") or [None])[0]
+
+        # 2. Synonym search fallback
+        if not mol:
+            r = requests.get(
+                f"{base}/molecule/search",
+                params={"q": query, "format": "json"},
+                headers=headers, timeout=10
+            )
+            data = r.json()
+            mol = (data.get("molecules") or [None])[0]
+
+        if not mol:
+            return None
+
+        synonyms = [s["synonym"] for s in (mol.get("molecule_synonyms") or []) if s.get("synonym")]
+        props = mol.get("molecule_properties") or {}
+
+        return {
+            "chembl_id":  mol.get("molecule_chembl_id", ""),
+            "inn":        mol.get("pref_name", query),
+            "type":       mol.get("molecule_type", ""),
+            "formula":    props.get("full_molformula", ""),
+            "mw":         props.get("full_mwt", ""),
+            "aliases":    list(dict.fromkeys([mol.get("pref_name", "")] + synonyms)),
+        }
+    except Exception:
+        return None
+
+
+# ══════════════════════════════════════════════════════════════
+# PUBMED SEARCH
+# ══════════════════════════════════════════════════════════════
+NONCLINICAL_TERMS = (
+    "preclinical[Title/Abstract] OR nonclinical[Title/Abstract] OR "
+    "toxicology[Title/Abstract] OR pharmacokinetics[Title/Abstract] OR "
+    "\"animal model\"[Title/Abstract] OR \"in vivo\"[Title/Abstract] OR "
+    "ADME[Title/Abstract] OR \"drug metabolism\"[Title/Abstract] OR "
+    "\"safety pharmacology\"[Title/Abstract]"
+)
+
+
+def build_pubmed_query(query: str, mode: str, aliases: list[str]) -> str:
+    if mode == "Drug name":
+        all_names = list(dict.fromkeys([query] + (aliases or [])))[:6]
+        name_terms = " OR ".join(f'"{n}"[Title/Abstract]' for n in all_names)
+        return f"({name_terms}) AND ({NONCLINICAL_TERMS})"
+    elif mode == "Company":
+        return f'"{query}"[Affiliation] AND ({NONCLINICAL_TERMS})'
+    else:  # Indication
+        return f'"{query}"[MeSH Terms] AND ({NONCLINICAL_TERMS})'
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def search_pubmed(query: str, mode: str, aliases: list[str], max_results: int = 40) -> list[dict]:
+    pm_query = build_pubmed_query(query, mode, aliases)
+    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+
+    # Search
+    r = requests.get(f"{base}/esearch.fcgi", params={
+        "db": "pubmed", "term": pm_query,
+        "retmax": max_results, "retmode": "json", "sort": "relevance"
+    }, timeout=15)
+    ids = r.json().get("esearchresult", {}).get("idlist", [])
+    if not ids:
+        return []
+
+    # Fetch
+    r = requests.get(f"{base}/efetch.fcgi", params={
+        "db": "pubmed", "id": ",".join(ids), "retmode": "xml"
+    }, timeout=20)
+    return parse_pubmed_xml(r.text)
+
+
+def parse_pubmed_xml(xml_text: str) -> list[dict]:
+    root = ET.fromstring(xml_text)
+    papers = []
+    for i, article in enumerate(root.findall(".//PubmedArticle")):
+        pmid  = getattr(article.find(".//PMID"), "text", "")
+        title = getattr(article.find(".//ArticleTitle"), "text", "No title") or "No title"
+
+        abstract_parts = [el.text or "" for el in article.findall(".//AbstractText")]
+        abstract = " ".join(abstract_parts).strip() or "No abstract available"
+
+        author_nodes = article.findall(".//Author")[:3]
+        authors = []
+        for au in author_nodes:
+            last = getattr(au.find("LastName"), "text", "")
+            init = getattr(au.find("Initials"), "text", "")
+            if last:
+                authors.append(f"{last} {init}".strip())
+        if len(article.findall(".//Author")) > 3:
+            authors.append("et al.")
+
+        journal = (
+            getattr(article.find(".//ISOAbbreviation"), "text", "") or
+            getattr(article.find(".//Title"), "text", "")
+        )
+        year = (
+            getattr(article.find(".//PubDate/Year"), "text", "") or
+            (getattr(article.find(".//MedlineDate"), "text", "") or "")[:4]
+        )
+
+        papers.append({
+            "pmid":       pmid,
+            "title":      title,
+            "abstract":   abstract,
+            "authors":    ", ".join(authors),
+            "journal":    journal,
+            "year":       year,
+            "raw_index":  i,
+            "category":   "other",
+            "confidence": "low",
+            "key_findings": [],
+        })
+    return papers
+
+
+# ══════════════════════════════════════════════════════════════
+# KEYWORD CLASSIFIER
+# ══════════════════════════════════════════════════════════════
+RULES = {
+    "safety": {
+        "title": ["toxic","toxicolog","genotox","mutagenic","carcinogen",
+                  "safety pharmacol","herg","hepatotox","nephrotox",
+                  "repeated dose","acute tox","subchronic","micronucleus",
+                  "ames test","reproductive tox","teratogen","noael","loael"],
+        "abstract": ["toxic","safety","genotox","noael","loael","adverse",
+                     "ld50","herg","hepatotox","nephrotox","organ tox"]
+    },
+    "pk": {
+        "title": ["pharmacokinetic","adme","bioavailability","absorption",
+                  "metabolism","excretion","half-life","clearance","auc",
+                  "cmax","drug interaction","cyp","p-glycoprotein",
+                  "plasma protein binding","tissue distribution"],
+        "abstract": ["pharmacokinetic","adme","bioavailability","half-life",
+                     "clearance","auc","cmax","metabolism","cyp","absorption"]
+    },
+    "pd": {
+        "title": ["pharmacodynamic","mechanism of action","moa","binding affinity",
+                  "ic50","selectivity","inhibition","agonist","antagonist",
+                  "kinase inhibit","target engagement","receptor binding"],
+        "abstract": ["pharmacodynamic","mechanism","binding affinity","ic50",
+                     "selectivity","inhibit","receptor","agonist","antagonist"]
+    },
+    "efficacy": {
+        "title": ["animal model","mouse model","rat model","in vivo","xenograft",
+                  "tumor model","disease model","efficacy","antitumor",
+                  "tumor growth","dose-response","ed50","survival benefit"],
+        "abstract": ["animal model","in vivo","xenograft","efficacy","tumor",
+                     "disease model","antitumor","survival","dose-response"]
+    },
+}
+
+SPECIES_PATTERNS = [
+    (r"\b(mice|mouse|murine)\b",                          "Mouse"),
+    (r"\b(rat|rats|rodent)\b",                            "Rat"),
+    (r"\b(monkey|cynomolgus|rhesus|primate|NHP)\b",       "Monkey"),
+    (r"\b(dog|dogs|beagle|canine)\b",                     "Dog"),
+    (r"\b(rabbit|rabbits)\b",                             "Rabbit"),
+    (r"\b(hamster|guinea pig|minipig|swine)\b",           "Other"),
+]
+
+METRIC_PATTERNS = [
+    r"(?:noael|loael)[^a-z\d]{0,10}(\d[\d.,]*\s*mg\/kg[^\s,;.]*)",
+    r"(?:ld50|lc50)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:mg\/kg|μg\/ml)[^\s,;.]*)",
+    r"(?:ic50|ec50|ki)[^a-z\d]{0,10}(\d[\d.,]*\s*(?:n[Mm]|μ[Mm])[^\s,;.]*)",
+    r"(?:bioavailability|oral\s+f)[^a-z\d]{0,10}(\d[\d.,]*\s*%)",
+    r"(?:half.life|t½|t1\/2)[^a-z\d]{0,10}(\d[\d.,]*\s*h(?:ours?)?)",
+]
+
+
+def keyword_classify(paper: dict) -> dict:
+    title    = paper["title"].lower()
+    abstract = paper["abstract"].lower()
+    for cat, rule in RULES.items():
+        t_hit = any(kw in title    for kw in rule["title"])
+        a_hit = any(kw in abstract for kw in rule["abstract"])
+        if t_hit and a_hit: return {"category": cat, "confidence": "high"}
+        if t_hit or  a_hit: return {"category": cat, "confidence": "low"}
+    return {"category": "other", "confidence": "low"}
+
+
+def extract_findings(paper: dict) -> list[dict]:
+    text = paper["abstract"]
+    findings = []
+    for pattern, label in SPECIES_PATTERNS:
+        if re.search(pattern, text, re.I):
+            findings.append({"key": "Species", "val": label})
+            break
+    for pat in METRIC_PATTERNS:
+        m = re.search(pat, text, re.I)
+        if m:
+            findings.append({"key": "Key metric", "val": m.group(0).strip()})
+            break
+    return findings
+
+
+def keyword_classify_all(papers: list[dict]) -> list[dict]:
+    for p in papers:
+        r = keyword_classify(p)
+        p["category"]    = r["category"]
+        p["confidence"]  = r["confidence"]
+        p["key_findings"] = extract_findings(p)
+    return papers
+
+
+# ══════════════════════════════════════════════════════════════
+# UI HELPERS
+# ══════════════════════════════════════════════════════════════
+CAT_LABELS = {
+    "safety":   "Safety / Tox",
+    "pk":       "PK / ADME",
+    "pd":       "PD / MOA",
+    "efficacy": "In vivo Efficacy",
+    "other":    "Other",
+}
+CAT_CSS = {
+    "safety": "cat-safety", "pk": "cat-pk",
+    "pd": "cat-pd", "efficacy": "cat-eff", "other": "cat-other",
+}
+
+
+def render_paper(p: dict):
+    cat_label = CAT_LABELS.get(p["category"], "Other")
+    cat_class = CAT_CSS.get(p["category"], "cat-other")
+    conf_tag  = '<span class="conf-low">Verify with source</span>' if p["confidence"] == "low" else ""
+
+    findings_html = ""
+    for f in p.get("key_findings", []):
+        findings_html += f'<span style="font-size:12px;color:#888;margin-right:6px;">{f["key"]}:</span><span style="font-size:12px;font-weight:500;margin-right:16px;">{f["val"]}</span>'
+
+    pubmed_link = f'<a href="https://pubmed.ncbi.nlm.nih.gov/{p["pmid"]}/" target="_blank" style="font-size:12px;color:#1a1a18;border:1px solid #ddd;border-radius:5px;padding:3px 9px;text-decoration:none;">PubMed →</a>' if p["pmid"] else ""
+
+    st.markdown(f"""
+    <div class="paper-card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:6px;">
+        <div style="font-size:14px;font-weight:500;line-height:1.4;flex:1;">{p["title"]}</div>
+        <span class="cat-badge {cat_class}">{cat_label}</span>
+      </div>
+      <div style="font-size:12px;color:#9a9a94;margin-bottom:6px;">{p["authors"] or "No author info"}{" · " + p["year"] if p["year"] else ""} · {p["journal"]}</div>
+      {f'<div style="margin-bottom:8px;">{findings_html}</div>' if findings_html else ""}
+      <div style="font-size:13px;color:#5a5a56;line-height:1.6;margin-bottom:10px;">{p["abstract"][:400]}{"..." if len(p["abstract"]) > 400 else ""}</div>
+      <div style="display:flex;gap:8px;align-items:center;">{conf_tag}{pubmed_link}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_coverage(papers: list[dict]):
+    counts = {k: 0 for k in ["safety", "pk", "pd", "efficacy"]}
+    for p in papers:
+        if p["category"] in counts:
+            counts[p["category"]] += 1
+    cols = st.columns(4)
+    labels = {"safety": "Safety / Tox", "pk": "PK / ADME", "pd": "PD / MOA", "efficacy": "In vivo Efficacy"}
+    for col, (cat, label) in zip(cols, labels.items()):
+        col.metric(label, counts[cat])
+
+
+def render_tab(papers: list[dict], cat: str):
+    filtered = papers if cat == "all" else [p for p in papers if p["category"] == cat]
+    if not filtered:
+        st.info("No data confirmed within the current scope of searched public literature.  \n*Note: This reflects the limits of publicly available literature and does not necessarily indicate an absence of data.*")
+        return
+    for p in filtered:
+        render_paper(p)
+
+
+# ══════════════════════════════════════════════════════════════
+# FILTERS
+# ══════════════════════════════════════════════════════════════
+def apply_filters(papers: list[dict], year: str, species: str, keyword: str, conf: str) -> list[dict]:
+    out = papers
+    if year:
+        out = [p for p in out if p["year"] == year]
+    if species:
+        out = [p for p in out if any(
+            f["key"] == "Species" and species.lower() in f["val"].lower()
+            for f in p.get("key_findings", [])
+        )]
+    if keyword:
+        kw = keyword.lower()
+        out = [p for p in out if kw in p["title"].lower() or kw in p["abstract"].lower()]
+    if conf == "High only":
+        out = [p for p in out if p["confidence"] == "high"]
+    elif conf == "Needs verification":
+        out = [p for p in out if p["confidence"] == "low"]
+    return out
+
+
+def sort_papers(papers: list[dict], sort_by: str) -> list[dict]:
+    if sort_by == "Newest first":
+        return sorted(papers, key=lambda p: p["year"] or "0", reverse=True)
+    elif sort_by == "Oldest first":
+        return sorted(papers, key=lambda p: p["year"] or "0")
+    return sorted(papers, key=lambda p: p["raw_index"])
+
+
+# ══════════════════════════════════════════════════════════════
+# MAIN APP
+# ══════════════════════════════════════════════════════════════
+def main():
+    # ── Header ───────────────────────────────────────────────
+    st.title("🔬 Nonclinical Drug Explorer")
+    st.caption("Preclinical data explorer powered by PubMed · ChEMBL name normalization · Keyword classification")
+
+    st.markdown('<div class="disclaimer">Data sourced from publicly available literature (PubMed/PMC). Results may reflect publication bias toward positive findings. GLP nonclinical study reports are not included. Always verify numeric data via the provided PubMed links.</div>', unsafe_allow_html=True)
+
+    # ── Sidebar ───────────────────────────────────────────────
+    with st.sidebar:
+        st.header("Settings")
+        max_results = st.slider("Max papers to fetch", 10, 40, 30, step=10)
+        st.caption("Classification: keyword rule-based (free, no API required)")
+        st.caption("PubMed · ChEMBL · keyword classifier")
+
+    # ── Search bar ────────────────────────────────────────────
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1:
+        query = st.text_input("", placeholder="Enter drug name (code name / INN / brand name all supported)",
+                              label_visibility="collapsed")
+    with col2:
+        mode = st.selectbox("", ["Drug name", "Company", "Indication"],
+                            label_visibility="collapsed")
+    with col3:
+        search = st.button("Search", type="primary", use_container_width=True)
+
+    if not query or not search:
+        if "results" not in st.session_state:
+            st.markdown("---")
+            st.markdown("**Try searching:** `imatinib` · `semaglutide` · `osimertinib` · `non-small cell lung cancer`")
+        elif "results" in st.session_state:
+            pass  # fall through to render cached results
+        else:
+            return
+
+    # ── Run search ────────────────────────────────────────────
+    if search and query:
+        st.session_state.pop("results", None)
+
+        chembl = None
+        aliases = []
+
+        with st.status("Searching...", expanded=True) as status:
+            # 1. ChEMBL
+            if mode == "Drug name":
+                st.write("Looking up drug info in ChEMBL...")
+                chembl = resolve_chembl(query)
+                if chembl:
+                    aliases = [a for a in chembl.get("aliases", []) if a and a.lower() != query.lower()]
+                    st.write(f"Found: **{chembl['inn']}** ({chembl['chembl_id']}) — {len(aliases)} known aliases")
+
+            # 2. PubMed
+            st.write("Searching PubMed...")
+            papers = search_pubmed(query, mode, aliases, max_results)
+
+            if not papers:
+                status.update(label="No results", state="error")
+                st.error(f'No public nonclinical literature found for **"{query}"** within the current search scope.')
+                return
+
+            st.write(f"Found **{len(papers)}** papers. Classifying...")
+
+            # 3. Classify (keyword rule-based)
+            papers = keyword_classify_all(papers)
+
+            status.update(label=f"Done — {len(papers)} papers loaded", state="complete")
+
+        st.session_state["results"]  = papers
+        st.session_state["chembl"]   = chembl
+        st.session_state["query"]    = query
+        st.session_state["mode"]     = mode
+
+    # ── Render results ────────────────────────────────────────
+    if "results" not in st.session_state:
+        return
+
+    papers  = st.session_state["results"]
+    chembl  = st.session_state.get("chembl")
+    q_label = st.session_state.get("query", query)
+
+    st.divider()
+
+    # Drug header
+    drug_name = chembl["inn"] if chembl else q_label
+    st.subheader(drug_name)
+
+    meta_cols = st.columns([1, 1, 1, 2])
+    meta_cols[0].markdown(f'`PubMed-based`')
+    meta_cols[1].markdown(f'`{len(papers)} papers`')
+    if chembl:
+        meta_cols[2].markdown(f'`{chembl["chembl_id"]}`')
+        if chembl.get("formula"):
+            meta_cols[3].markdown(f'`{chembl["formula"]} · {chembl["mw"]} g/mol`')
+
+    # ChEMBL aliases
+    if chembl and aliases:
+        with st.expander(f"Known aliases ({len(aliases)})", expanded=False):
+            st.write(" · ".join(aliases[:15]))
+
+    # Coverage
+    st.markdown("**Coverage by category**")
+    render_coverage(papers)
+    st.divider()
+
+    # ── Filters ───────────────────────────────────────────────
+    with st.expander("Filters & Sort", expanded=False):
+        fc1, fc2, fc3, fc4, fc5 = st.columns(5)
+        years   = ["All"] + sorted({p["year"] for p in papers if p["year"]}, reverse=True)
+        species_vals = list({f["val"] for p in papers for f in p.get("key_findings",[]) if f["key"]=="Species"})
+
+        f_year    = fc1.selectbox("Year",       years)
+        f_species = fc2.selectbox("Species",    ["All"] + sorted(species_vals))
+        f_keyword = fc3.text_input("Keyword",   placeholder="title / abstract")
+        f_conf    = fc4.selectbox("Confidence", ["All", "High only", "Needs verification"])
+        f_sort    = fc5.selectbox("Sort",       ["Relevance", "Newest first", "Oldest first"])
+
+    filtered = apply_filters(
+        papers,
+        year    = "" if f_year    == "All" else f_year,
+        species = "" if f_species == "All" else f_species,
+        keyword = f_keyword,
+        conf    = "" if f_conf    == "All" else f_conf,
+    )
+    filtered = sort_papers(filtered, f_sort)
+    st.caption(f"{len(filtered)} papers shown")
+
+    # ── Category tabs ─────────────────────────────────────────
+    tabs = st.tabs(["All", "Safety / Tox", "PK / ADME", "PD / MOA", "In vivo Efficacy"])
+    cat_keys = ["all", "safety", "pk", "pd", "efficacy"]
+    for tab, cat in zip(tabs, cat_keys):
+        with tab:
+            render_tab(filtered, cat)
+
+    # ── Clinical banner ───────────────────────────────────────
+    st.divider()
+    inn = chembl["inn"] if chembl else q_label
+    chembl_id = chembl["chembl_id"] if chembl else ""
+    st.info(
+        f'**Link to Clinical Trials App** — Track nonclinical → clinical development for **{inn}**  \n'
+        f'Link key: INN = `{inn}`' + (f'  ·  ChEMBL = `{chembl_id}`' if chembl_id else "")
+    )
+
+
+if __name__ == "__main__":
+    main()
