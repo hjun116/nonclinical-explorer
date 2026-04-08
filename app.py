@@ -533,9 +533,6 @@ def render_paper(p: dict):
     else:
         findings_html = '<div style="font-size:12px;color:#bbb;margin-bottom:10px;font-style:italic;">No structured data extracted from abstract</div>'
 
-    source_db_tag = ""
-    if p.get("source_db") and p["source_db"] != "PubMed":
-        source_db_tag = f'<span style="font-size:11px;color:#0a4080;background:#ddeeff;padding:2px 7px;border-radius:4px;margin-right:6px;">{p["source_db"]}</span>'
 
     pubmed_link = (
         f'<a href="https://pubmed.ncbi.nlm.nih.gov/{p["pmid"]}/" target="_blank" '
