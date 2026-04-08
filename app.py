@@ -542,11 +542,8 @@ def render_paper(p: dict):
 
     st.markdown(f"""
     <div class="paper-card">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:8px;">
-        <div style="font-size:15px;font-weight:600;line-height:1.4;flex:1;color:#1a1a18;">{p["title"]}</div>
-        <span class="cat-badge {cat_class}" style="flex-shrink:0;">{cat_label}</span>
-      </div>
-      <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:12px;">
+     <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px;">
+        {pubmed_link}
         <span style="font-size:12px;color:#5a5a56;">
           👤 {p["authors"] or "No author info"}
         </span>
