@@ -563,7 +563,7 @@ def render_paper(p: dict):
       <div style="font-size:11px;color:#b0a090;margin-bottom:8px;font-style:italic;">
         ⚠ Extracted values are based on abstract text only. Always refer to the full paper for complete and verified data.
       </div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">{iv_badge}{source_db_tag}{conf_tag}{pubmed_link}</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">{iv_badge}{conf_tag}{pubmed_link}</div>
     </div>
     """, unsafe_allow_html=True)
 
