@@ -508,7 +508,7 @@ CAT_CSS = {
 def render_paper(p: dict):
     cat_label = CAT_LABELS.get(p["category"], "Other")
     cat_class = CAT_CSS.get(p["category"], "cat-other")
-    conf_tag  = '<span class="conf-low">⚠ Verify with source</span>' if p["confidence"] == "low" else ""
+    conf_tag  = '<span style="font-size:11px;background:#fff0e6;color:#c05000;padding:2px 8px;border-radius:4px;">⚠ Verify with source</span>' if p["confidence"] == "low" else ""
 
     # In vivo badge
     iv_conf = p.get("in_vivo_confidence", "unlikely")
