@@ -188,6 +188,17 @@ def parse_pubmed_xml(xml_text: str) -> list[dict]:
             getattr(article.find(".//Title"),           "text", "").strip()
         )
 
+        # Publication status — flag preprints and epub-ahead-of-print
+        pub_status = getattr(article.find(".//PublicationStatus"), "text", "").strip()
+        pub_types  = [el.text or "" for el in article.findall(".//PublicationType")]
+        is_preprint = any("Preprint" in pt for pt in pub_types)
+
+        if not journal:
+            if is_preprint:
+                journal = "Preprint"
+            elif pub_status in ("aheadofprint", "epublish"):
+                journal = "Epub ahead of print"
+
         year = (
             getattr(article.find(".//PubDate/Year"),  "text", "") or
             getattr(article.find(".//PubDate/MedlineDate"), "text", "")[:4] or
@@ -270,6 +281,15 @@ def parse_europe_pmc(results: list[dict]) -> list[dict]:
             item.get("journalTitle",        "").strip() or
             item.get("journal",             "").strip()
         )
+        # Flag preprints explicitly
+        if not journal:
+            src_field = item.get("source", "")
+            pub_model = item.get("pubTypeList", {})
+            if src_field in ("PPR",) or "Preprint" in str(pub_model):
+                journal = "Preprint"
+            else:
+                journal = "Epub ahead of print"
+
         year = str(item.get("pubYear", ""))
 
         papers.append({
@@ -575,7 +595,9 @@ def render_paper(p: dict):
         {pubmed_link}
         <span style="font-size:12px;color:#5a5a56;">👤 {p["authors"] or "No author info"}</span>
         <span style="font-size:12px;color:#5a5a56;">📅 {p["year"] or "—"}</span>
-        <span style="font-size:12px;color:#5a5a56;font-style:italic;">📖 {p["journal"] or "—"}</span>
+        <span style="font-size:12px;color:{'#0a4080' if p['journal'] in ('Preprint',) else '#9a5000' if p['journal'] == 'Epub ahead of print' else '#5a5a56'};font-style:italic;">
+          📖 {p["journal"] or "—"}
+        </span>
       </div>
       <div style="border-top:1px solid #f0efeb;padding-top:10px;margin-bottom:10px;">
         {findings_html}
