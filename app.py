@@ -406,6 +406,17 @@ def extract_findings(text: str, category: str) -> list[dict]:
     return findings
 
 
+def keyword_classify(paper: dict) -> dict:
+    title    = paper["title"].lower()
+    abstract = paper["abstract"].lower()
+    for cat, rule in RULES.items():
+        t_hit = any(kw in title    for kw in rule["title"])
+        a_hit = any(kw in abstract for kw in rule["abstract"])
+        if t_hit and a_hit: return {"category": cat, "confidence": "high"}
+        if t_hit or  a_hit: return {"category": cat, "confidence": "low"}
+    return {"category": "other", "confidence": "low"}
+
+
 def keyword_classify_all(papers: list[dict]) -> list[dict]:
     for p in papers:
         r = keyword_classify(p)
