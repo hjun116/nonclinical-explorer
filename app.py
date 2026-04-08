@@ -508,7 +508,12 @@ CAT_CSS = {
 def render_paper(p: dict):
     cat_label = CAT_LABELS.get(p["category"], "Other")
     cat_class = CAT_CSS.get(p["category"], "cat-other")
-    conf_tag  = '<span style="font-size:11px;background:#fff0e6;color:#c05000;padding:2px 8px;border-radius:4px;">⚠ Verify with source</span>' if p["confidence"] == "low" else ""
+
+    # Verify with source badge — orange
+    conf_tag = (
+        '<span style="font-size:11px;background:#fff0e6;color:#c05000;'
+        'padding:2px 8px;border-radius:4px;">⚠ Verify with source</span>'
+    ) if p["confidence"] == "low" else ""
 
     # In vivo badge
     iv_conf = p.get("in_vivo_confidence", "unlikely")
@@ -519,7 +524,14 @@ def render_paper(p: dict):
     else:
         iv_badge = '<span style="font-size:11px;background:#f5f5f5;color:#aaa;padding:2px 8px;border-radius:4px;">⚗ In vitro / unclear</span>'
 
-    # Key findings as a small grid table
+    # Full record link — shown next to authors
+    pubmed_link = (
+        f'<a href="https://pubmed.ncbi.nlm.nih.gov/{p["pmid"]}/" target="_blank" '
+        f'style="font-size:12px;color:#1a1a18;border:1px solid #ddd;border-radius:5px;'
+        f'padding:3px 9px;text-decoration:none;white-space:nowrap;">Full record →</a>'
+    ) if p["pmid"] else ""
+
+    # Key findings grid
     findings = p.get("key_findings", [])
     if findings:
         rows = "".join(
@@ -533,26 +545,17 @@ def render_paper(p: dict):
     else:
         findings_html = '<div style="font-size:12px;color:#bbb;margin-bottom:10px;font-style:italic;">No structured data extracted from abstract</div>'
 
-
-    pubmed_link = (
-        f'<a href="https://pubmed.ncbi.nlm.nih.gov/{p["pmid"]}/" target="_blank" '
-        f'style="font-size:12px;color:#1a1a18;border:1px solid #ddd;border-radius:5px;'
-        f'padding:3px 9px;text-decoration:none;">Full record →</a>'
-    ) if p["pmid"] else ""
-
     st.markdown(f"""
     <div class="paper-card">
-     <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:8px;">
+        <div style="font-size:15px;font-weight:600;line-height:1.4;flex:1;color:#1a1a18;">{p["title"]}</div>
+        <span class="cat-badge {cat_class}" style="flex-shrink:0;">{cat_label}</span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px;">
         {pubmed_link}
-        <span style="font-size:12px;color:#5a5a56;">
-          👤 {p["authors"] or "No author info"}
-        </span>
-        <span style="font-size:12px;color:#5a5a56;">
-          📅 {p["year"] or "—"}
-        </span>
-        <span style="font-size:12px;color:#5a5a56;font-style:italic;">
-          📖 {p["journal"] or "—"}
-        </span>
+        <span style="font-size:12px;color:#5a5a56;">👤 {p["authors"] or "No author info"}</span>
+        <span style="font-size:12px;color:#5a5a56;">📅 {p["year"] or "—"}</span>
+        <span style="font-size:12px;color:#5a5a56;font-style:italic;">📖 {p["journal"] or "—"}</span>
       </div>
       <div style="border-top:1px solid #f0efeb;padding-top:10px;margin-bottom:10px;">
         {findings_html}
