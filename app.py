@@ -1,5 +1,5 @@
 """
-Nonclinical Drug Explorer
+Preclinical Data Explorer
 ─────────────────────────
 APIs used (all free, no key required):
   • PubMed E-utilities  — https://eutils.ncbi.nlm.nih.gov/
@@ -17,7 +17,7 @@ from typing import Optional
 
 # ── Page config ───────────────────────────────────────────────
 st.set_page_config(
-    page_title="Nonclinical Drug Explorer",
+    page_title="Preclinical Data Explorer",
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -119,7 +119,11 @@ def build_pubmed_query(query: str, mode: str, aliases: list[str]) -> str:
         name_terms = " OR ".join(f'"{n}"[Title/Abstract]' for n in all_names)
         return f"({name_terms}) AND ({NONCLINICAL_TERMS})"
     elif mode == "Company":
-        return f'"{query}"[Affiliation] AND ({NONCLINICAL_TERMS})'
+        # Search both Affiliation and All Fields to maximise coverage
+        return (
+            f'("{query}"[Affiliation] OR "{query}"[All Fields]) '
+            f'AND ({NONCLINICAL_TERMS})'
+        )
     else:  # Indication
         return f'"{query}"[MeSH Terms] AND ({NONCLINICAL_TERMS})'
 
@@ -249,7 +253,10 @@ def search_europe_pmc(query: str, mode: str, aliases: list[str], max_results: in
         name_terms = " OR ".join(f'"{n}"' for n in all_names)
         q = f"({name_terms}) AND {EPMC_NONCLINICAL_KW} AND (PUB_YEAR:[{min_year} TO 3000])"
     elif mode == "Company":
-        q = f'AFFILIATION:"{query}" AND {EPMC_NONCLINICAL_KW} AND (PUB_YEAR:[{min_year} TO 3000])'
+        q = (
+            f'(AFFILIATION:"{query}" OR "{query}") '
+            f'AND {EPMC_NONCLINICAL_KW} AND (PUB_YEAR:[{min_year} TO 3000])'
+        )
     else:
         q = f'"{query}" AND {EPMC_NONCLINICAL_KW} AND (PUB_YEAR:[{min_year} TO 3000])'
 
@@ -674,8 +681,8 @@ def sort_papers(papers: list[dict], sort_by: str) -> list[dict]:
 # ══════════════════════════════════════════════════════════════
 def main():
     # ── Header ───────────────────────────────────────────────
-    st.title("🔬 Nonclinical Drug Explorer")
-    st.caption("Preclinical data explorer · PubMed (relevance) + Europe PMC (newest) · ChEMBL name normalization · Keyword classification")
+    st.title("🔬 Preclinical Data Explorer")
+    st.caption("Powered by PubMed · Europe PMC · ChEMBL name normalization · Keyword classification")
 
     st.markdown("""
 <div style="background:#fffbf0;border:1px solid #f0d080;border-radius:10px;padding:14px 18px;margin-bottom:1.2rem;">
