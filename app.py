@@ -119,11 +119,7 @@ def build_pubmed_query(query: str, mode: str, aliases: list[str]) -> str:
         name_terms = " OR ".join(f'"{n}"[Title/Abstract]' for n in all_names)
         return f"({name_terms}) AND ({NONCLINICAL_TERMS})"
     elif mode == "Company":
-        # Search both Affiliation and All Fields to maximise coverage
-        return (
-            f'("{query}"[Affiliation] OR "{query}"[All Fields]) '
-            f'AND ({NONCLINICAL_TERMS})'
-        )
+        return f'"{query}"[Affiliation] AND ({NONCLINICAL_TERMS})'
     else:  # Indication
         return f'"{query}"[MeSH Terms] AND ({NONCLINICAL_TERMS})'
 
@@ -254,7 +250,7 @@ def search_europe_pmc(query: str, mode: str, aliases: list[str], max_results: in
         q = f"({name_terms}) AND {EPMC_NONCLINICAL_KW} AND (PUB_YEAR:[{min_year} TO 3000])"
     elif mode == "Company":
         q = (
-            f'(AFFILIATION:"{query}" OR "{query}") '
+            f'AFFILIATION:"{query}" '
             f'AND {EPMC_NONCLINICAL_KW} AND (PUB_YEAR:[{min_year} TO 3000])'
         )
     else:
