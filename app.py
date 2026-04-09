@@ -637,6 +637,15 @@ def render_paper(p: dict):
     else:
         findings_html = '<div style="font-size:12px;color:#bbb;margin-bottom:10px;font-style:italic;">No structured data extracted from abstract</div>'
 
+    # Pre-compute journal color to avoid f-string / dict-key conflict
+    journal_val = p.get("journal") or "—"
+    if journal_val == "Preprint":
+        journal_color = "#0a4080"
+    elif journal_val in ("Epub ahead of print", "Journal not yet assigned"):
+        journal_color = "#9a5000"
+    else:
+        journal_color = "#5a5a56"
+
     st.markdown(f"""
     <div class="paper-card">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:8px;">
@@ -647,9 +656,7 @@ def render_paper(p: dict):
         {pubmed_link}
         <span style="font-size:12px;color:#5a5a56;">👤 {p["authors"] or "No author info"}</span>
         <span style="font-size:12px;color:#5a5a56;">📅 {p["year"] or "—"}</span>
-        <span style="font-size:12px;color:{'#0a4080' if p['journal'] == 'Preprint' else '#9a5000' if p['journal'] in ('Epub ahead of print', 'Journal not yet assigned') else '#5a5a56'};font-style:italic;">
-          📖 {p["journal"] or "—"}
-        </span>
+        <span style="font-size:12px;color:{journal_color};font-style:italic;">📖 {journal_val}</span>
       </div>
       <div style="border-top:1px solid #f0efeb;padding-top:10px;margin-bottom:10px;">
         {findings_html}
