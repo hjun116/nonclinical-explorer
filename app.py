@@ -341,6 +341,31 @@ def merge_and_deduplicate(pubmed_papers: list[dict], epmc_papers: list[dict]) ->
     return merged
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def search_basic_research(company: str, max_results: int = 30, min_year: int = 2015) -> list[dict]:
+    """Search for non-preclinical publications from a company (Affiliation only, no nonclinical filter)."""
+    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+
+    r = requests.get(f"{base}/esearch.fcgi", params={
+        "db":       "pubmed",
+        "term":     f'"{company}"[Affiliation]',
+        "retmax":   max_results,
+        "retmode":  "json",
+        "sort":     "pub+date",
+        "datetype": "pdat",
+        "mindate":  str(min_year),
+        "maxdate":  "3000",
+    }, timeout=15)
+    ids = r.json().get("esearchresult", {}).get("idlist", [])
+    if not ids:
+        return []
+
+    r = requests.get(f"{base}/efetch.fcgi", params={
+        "db": "pubmed", "id": ",".join(ids), "retmode": "xml"
+    }, timeout=20)
+    return parse_pubmed_xml(r.text)
+
+
 # ══════════════════════════════════════════════════════════════
 # KEYWORD CLASSIFIER
 # ══════════════════════════════════════════════════════════════
@@ -631,6 +656,42 @@ def render_coverage(papers: list[dict]):
         col.metric(label, counts[cat])
 
 
+def render_basic_research(papers: list[dict]):
+    """Render basic research papers as a compact list (no category classification)."""
+    if not papers:
+        st.caption("No additional publications found.")
+        return
+
+    for p in papers:
+        pubmed_link = (
+            f'<a href="https://pubmed.ncbi.nlm.nih.gov/{p["pmid"]}/" target="_blank" '
+            f'style="font-size:12px;color:#1a1a18;border:1px solid #ddd;border-radius:5px;'
+            f'padding:3px 9px;text-decoration:none;white-space:nowrap;">Full record →</a>'
+        ) if p["pmid"] else ""
+
+        journal_color = (
+            "#0a4080" if p["journal"] == "Preprint"
+            else "#9a5000" if p["journal"] in ("Epub ahead of print", "Journal not yet assigned")
+            else "#5a5a56"
+        )
+
+        st.markdown(f"""
+        <div style="border:0.5px solid #e8e8e4;border-radius:8px;padding:10px 14px;
+                    margin-bottom:8px;background:#fafaf8;">
+          <div style="font-size:14px;font-weight:500;line-height:1.4;
+                      color:#1a1a18;margin-bottom:6px;">{p["title"]}</div>
+          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+            {pubmed_link}
+            <span style="font-size:12px;color:#5a5a56;">👤 {p["authors"] or "No author info"}</span>
+            <span style="font-size:12px;color:#5a5a56;">📅 {p["year"] or "—"}</span>
+            <span style="font-size:12px;color:{journal_color};font-style:italic;">
+              📖 {p["journal"] or "—"}
+            </span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
 def render_tab(papers: list[dict], cat: str):
     filtered = papers if cat == "all" else [p for p in papers if p["category"] == cat]
     if not filtered:
@@ -638,6 +699,35 @@ def render_tab(papers: list[dict], cat: str):
         return
     for p in filtered:
         render_paper(p)
+    """Render basic research papers as a compact list (no category classification)."""
+    if not papers:
+        st.caption("No additional publications found.")
+        return
+
+    for p in papers:
+        pubmed_link = (
+            f'<a href="https://pubmed.ncbi.nlm.nih.gov/{p["pmid"]}/" target="_blank" '
+            f'style="font-size:12px;color:#1a1a18;border:1px solid #ddd;border-radius:5px;'
+            f'padding:3px 9px;text-decoration:none;white-space:nowrap;">Full record →</a>'
+        ) if p["pmid"] else ""
+
+        journal_color = (
+            "#0a4080" if p["journal"] == "Preprint"
+            else "#9a5000" if p["journal"] in ("Epub ahead of print", "Journal not yet assigned")
+            else "#5a5a56"
+        )
+
+        st.markdown(f"""
+        <div style="border:0.5px solid #e8e8e4;border-radius:8px;padding:10px 14px;margin-bottom:8px;background:#fafaf8;">
+          <div style="font-size:14px;font-weight:500;line-height:1.4;color:#1a1a18;margin-bottom:6px;">{p["title"]}</div>
+          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+            {pubmed_link}
+            <span style="font-size:12px;color:#5a5a56;">👤 {p["authors"] or "No author info"}</span>
+            <span style="font-size:12px;color:#5a5a56;">📅 {p["year"] or "—"}</span>
+            <span style="font-size:12px;color:{journal_color};font-style:italic;">📖 {p["journal"] or "—"}</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -677,7 +767,12 @@ def sort_papers(papers: list[dict], sort_by: str) -> list[dict]:
 # ══════════════════════════════════════════════════════════════
 def main():
     # ── Header ───────────────────────────────────────────────
-    st.title("🔬 Preclinical Data Explorer")
+    # ── Header — clickable title resets the app ───────────────
+    st.markdown("""
+<a href="/" target="_self" style="text-decoration:none;color:inherit;">
+  <span style="font-size:2rem;font-weight:700;">🔬 Preclinical Data Explorer</span>
+</a>
+""", unsafe_allow_html=True)
     st.caption("Powered by PubMed · Europe PMC · ChEMBL name normalization · Keyword classification")
 
     st.markdown("""
@@ -767,23 +862,38 @@ def main():
             # 3. Classify (keyword rule-based)
             papers = keyword_classify_all(papers)
 
-            status.update(label=f"Done — {len(papers)} papers loaded", state="complete")
+            # 4. Basic research (Company mode only)
+            basic_papers = []
+            if mode == "Company" and papers is not None:
+                st.write("Searching for other publications from this company...")
+                all_company = search_basic_research(query, max_results, min_year)
+                preclinical_pmids = {p["pmid"] for p in papers if p.get("pmid")}
+                basic_papers = [
+                    p for p in all_company
+                    if p.get("pmid") not in preclinical_pmids
+                ]
+                if basic_papers:
+                    st.write(f"Found **{len(basic_papers)}** additional non-preclinical publications")
 
-        st.session_state["results"]  = papers
-        st.session_state["chembl"]   = chembl
-        st.session_state["aliases"]  = aliases
-        st.session_state["query"]    = query
-        st.session_state["mode"]     = mode
-        st.session_state["min_year"] = min_year
+            status.update(label=f"Done — {len(papers)} preclinical papers loaded", state="complete")
+
+        st.session_state["results"]      = papers
+        st.session_state["basic_papers"] = basic_papers
+        st.session_state["chembl"]       = chembl
+        st.session_state["aliases"]      = aliases
+        st.session_state["query"]        = query
+        st.session_state["mode"]         = mode
+        st.session_state["min_year"]     = min_year
 
     # ── Render results ────────────────────────────────────────
     if "results" not in st.session_state:
         return
 
-    papers  = st.session_state["results"]
-    chembl  = st.session_state.get("chembl")
-    aliases = st.session_state.get("aliases", [])
-    q_label = st.session_state.get("query", query)
+    papers       = st.session_state["results"]
+    basic_papers = st.session_state.get("basic_papers", [])
+    chembl       = st.session_state.get("chembl")
+    aliases      = st.session_state.get("aliases", [])
+    q_label      = st.session_state.get("query", query)
 
     st.divider()
 
@@ -863,6 +973,21 @@ def main():
     for tab, cat in zip(tabs, cat_keys):
         with tab:
             render_tab(filtered, cat)
+
+    # ── Basic Research (Company mode only) ───────────────────
+    saved_mode = st.session_state.get("mode", "")
+    if saved_mode == "Company" and basic_papers:
+        st.divider()
+        with st.expander(
+            f"📄 Other Publications from {q_label} ({len(basic_papers)} papers) — not classified as preclinical",
+            expanded=False
+        ):
+            st.caption(
+                "These publications were found via affiliation search but do not contain preclinical/nonclinical keywords. "
+                "They may include clinical studies, reviews, methodology papers, or basic science. "
+                "Not classified by category. Always verify via the original publication link."
+            )
+            render_basic_research(basic_papers)
 
     # ── Clinical banner ───────────────────────────────────────
     st.divider()
