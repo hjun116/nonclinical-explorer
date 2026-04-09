@@ -207,6 +207,13 @@ def parse_pubmed_xml(xml_text: str) -> list[dict]:
             else:
                 journal = "Journal not yet assigned"
 
+        # DOI — for deduplication with Europe PMC
+        doi = ""
+        for id_el in article.findall(".//ArticleId"):
+            if id_el.get("IdType") == "doi":
+                doi = (id_el.text or "").strip().lower()
+                break
+
         year = (
             getattr(article.find(".//PubDate/Year"),  "text", "") or
             getattr(article.find(".//PubDate/MedlineDate"), "text", "")[:4] or
@@ -215,6 +222,7 @@ def parse_pubmed_xml(xml_text: str) -> list[dict]:
 
         papers.append({
             "pmid":        pmid,
+            "doi":         doi,
             "title":       title,
             "abstract":    abstract,
             "authors":     ", ".join(authors),
@@ -301,9 +309,11 @@ def parse_europe_pmc(results: list[dict]) -> list[dict]:
                 journal = "Epub ahead of print"
 
         year = str(item.get("pubYear", ""))
+        doi  = (item.get("doi", "") or "").strip().lower()
 
         papers.append({
             "pmid":        pmid,
+            "doi":         doi,
             "title":       title,
             "abstract":    abstract,
             "authors":     ", ".join(authors),
@@ -319,24 +329,31 @@ def parse_europe_pmc(results: list[dict]) -> list[dict]:
 
 
 def merge_and_deduplicate(pubmed_papers: list[dict], epmc_papers: list[dict]) -> list[dict]:
-    """Merge results: PubMed (relevance) first, Europe PMC (newest) fills gaps.
-    Deduplication by PMID. Papers without PMID (preprints) are always included."""
+    """Merge PubMed (relevance-sorted) + Europe PMC (newest-first).
+    Deduplication priority: PMID → DOI. Title-based dedup omitted (too many false positives)."""
     seen_pmids: set[str] = set()
+    seen_dois:  set[str] = set()
     merged = []
 
     for p in pubmed_papers:
         pid = p.get("pmid", "")
-        if pid:
-            seen_pmids.add(pid)
+        did = p.get("doi", "")
+        if pid: seen_pmids.add(pid)
+        if did: seen_dois.add(did)
         merged.append(p)
 
     for p in epmc_papers:
         pid = p.get("pmid", "")
-        if not pid or pid not in seen_pmids:
-            if pid:
-                seen_pmids.add(pid)
-            p["raw_index"] = len(merged)
-            merged.append(p)
+        did = p.get("doi", "")
+        # Skip if already seen by PMID or DOI
+        if pid and pid in seen_pmids:
+            continue
+        if did and did in seen_dois:
+            continue
+        if pid: seen_pmids.add(pid)
+        if did: seen_dois.add(did)
+        p["raw_index"] = len(merged)
+        merged.append(p)
 
     return merged
 
@@ -699,35 +716,6 @@ def render_tab(papers: list[dict], cat: str):
         return
     for p in filtered:
         render_paper(p)
-    """Render basic research papers as a compact list (no category classification)."""
-    if not papers:
-        st.caption("No additional publications found.")
-        return
-
-    for p in papers:
-        pubmed_link = (
-            f'<a href="https://pubmed.ncbi.nlm.nih.gov/{p["pmid"]}/" target="_blank" '
-            f'style="font-size:12px;color:#1a1a18;border:1px solid #ddd;border-radius:5px;'
-            f'padding:3px 9px;text-decoration:none;white-space:nowrap;">Full record →</a>'
-        ) if p["pmid"] else ""
-
-        journal_color = (
-            "#0a4080" if p["journal"] == "Preprint"
-            else "#9a5000" if p["journal"] in ("Epub ahead of print", "Journal not yet assigned")
-            else "#5a5a56"
-        )
-
-        st.markdown(f"""
-        <div style="border:0.5px solid #e8e8e4;border-radius:8px;padding:10px 14px;margin-bottom:8px;background:#fafaf8;">
-          <div style="font-size:14px;font-weight:500;line-height:1.4;color:#1a1a18;margin-bottom:6px;">{p["title"]}</div>
-          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
-            {pubmed_link}
-            <span style="font-size:12px;color:#5a5a56;">👤 {p["authors"] or "No author info"}</span>
-            <span style="font-size:12px;color:#5a5a56;">📅 {p["year"] or "—"}</span>
-            <span style="font-size:12px;color:{journal_color};font-style:italic;">📖 {p["journal"] or "—"}</span>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -791,8 +779,10 @@ def main():
     # ── Sidebar ───────────────────────────────────────────────
     with st.sidebar:
         st.header("Settings")
+        from datetime import date
+        current_year = date.today().year
         max_results = st.slider("Max papers per source", 10, 40, 30, step=10)
-        min_year = st.slider("Published from (year)", 2000, 2024, 2015, step=1)
+        min_year = st.slider("Published from (year)", 2000, current_year, 2015, step=1)
         st.divider()
         st.caption("**Study type**")
         in_vivo_only = st.toggle(
@@ -857,7 +847,8 @@ def main():
                 st.error(f'No public nonclinical literature found for **"{query}"** within the current search scope.')
                 return
 
-            st.write(f"PubMed: **{len(pubmed_papers)}** · Europe PMC unique: **{len(epmc_papers) - (len(papers) - len(pubmed_papers))}** added → **{len(papers)}** total")
+            epmc_unique = len(papers) - len(pubmed_papers)
+            st.write(f"PubMed: **{len(pubmed_papers)}** · Europe PMC added: **{epmc_unique}** unique → **{len(papers)}** total")
 
             # 3. Classify (keyword rule-based)
             papers = keyword_classify_all(papers)
